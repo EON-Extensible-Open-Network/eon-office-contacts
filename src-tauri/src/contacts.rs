@@ -13,10 +13,13 @@
 //! if the person allowed them `call:org.eon.office.contacts`.
 
 use crate::vcard;
-use eon_office_sdk::{Client, Error};
-use serde_json::{json, Map, Value};
+use eon_office_core::manifest::Manifest;
+use eon_office_core::{links as eon_links, AppContext, Home};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub const COLLECTION: &str = "contacts";
 pub type Outcome = Result<Value, Value>;
@@ -25,13 +28,29 @@ fn fail(code: &str, message: impl Into<String>) -> Value {
     json!({ "code": code, "message": message.into() })
 }
 
-fn sdk<T>(result: Result<T, Error>) -> Result<T, Value> {
+/// A library error as the interface sees it: `{ code, message, data }`.
+pub fn core<T>(result: eon_office_core::Result<T>) -> Result<T, Value> {
     result.map_err(|e| {
-        let mut out = fail(e.code(), e.to_string());
-        if let Error::Protocol { data, .. } = &e {
-            out["data"] = data.clone();
-        }
-        out
+        let error = e.to_json();
+        json!({ "code": error["data"]["code"], "message": error["message"], "data": error["data"] })
+    })
+}
+
+/// What other applications may read about a contact: who it is and how to
+/// reach them. Never the note, the address, the birthday or the groups.
+pub fn summary(id: &str, contact: &Value) -> Value {
+    let values = |key: &str| {
+        contact[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["value"].as_str())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    json!({
+        "id": id, "name": contact["name"], "org": contact["org"],
+        "emails": values("emails"), "phones": values("phones"),
     })
 }
 
@@ -176,23 +195,62 @@ fn clean(fields: &Value) -> Result<Value, Value> {
 }
 
 pub struct Contacts {
-    pub client: Client,
+    ctx: Mutex<AppContext>,
 }
 
 impl Contacts {
-    pub fn new(client: Client) -> Contacts {
-        Contacts { client }
+    /// Open Contacts' store in `home`, registering Contacts with `folder` as
+    /// where its program lives (`None`: leave the registration as it is).
+    /// Contacts kept before summaries were published are published once.
+    pub fn open(home: &Home, folder: Option<&Path>) -> Result<Contacts, Value> {
+        let manifest: Value = serde_json::from_str(crate::MANIFEST)
+            .map_err(|e| fail("internal", format!("manifest.json: {e}")))?;
+        let manifest = core(Manifest::from_json(manifest))?;
+        let contacts = Contacts {
+            ctx: Mutex::new(core(home.app(&manifest, folder))?),
+        };
+        if contacts.ctx().settings_get("published").ok() != Some(json!(1)) {
+            for c in contacts.all()? {
+                let id = c["id"].as_str().unwrap_or_default().to_owned();
+                let _ = contacts
+                    .ctx()
+                    .publish(&format!("contact:{id}"), &summary(&id, &c));
+            }
+            let _ = contacts.ctx().settings_set("published", &json!(1));
+        }
+        Ok(contacts)
+    }
+
+    fn ctx(&self) -> MutexGuard<'_, AppContext> {
+        self.ctx.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The person's preferences: language, theme, text size, motion, contrast.
+    pub fn prefs(&self) -> Outcome {
+        core(self.ctx().prefs())
+    }
+
+    /// Changes whenever a preference changes; the window polls it.
+    pub fn prefs_version(&self) -> i64 {
+        self.ctx().prefs_version().unwrap_or(0)
+    }
+
+    fn activity(&self, id: &str, title: &Value, kind: &str) {
+        let _ = self
+            .ctx()
+            .activity(id, title.as_str().unwrap_or_default(), kind);
+    }
+
+    fn find(&self, id: &str) -> Result<Option<Value>, Value> {
+        let found = core(self.ctx().get(COLLECTION, id))?;
+        Ok((!found.is_null()).then_some(found))
     }
 
     fn all(&self) -> Result<Vec<Value>, Value> {
         let mut out = Vec::new();
         let mut after: Option<String> = None;
         loop {
-            let mut params = json!({ "collection": COLLECTION, "limit": 1000 });
-            if let Some(a) = &after {
-                params["after"] = json!(a);
-            }
-            let page = sdk(self.client.call("storage.list", params))?;
+            let page = core(self.ctx().list(COLLECTION, after.as_deref(), 1000))?;
             let items = page["items"].as_array().cloned().unwrap_or_default();
             for item in &items {
                 let mut c = item["doc"].clone();
@@ -246,20 +304,18 @@ impl Contacts {
     }
 
     pub fn get(&self, id: &str) -> Outcome {
-        let found = sdk(self.client.get(COLLECTION, id))?
+        let found = self
+            .find(id)?
             .ok_or_else(|| fail("not_found", "no such contact"))?;
         let mut c = found["doc"].clone();
         c["id"] = json!(id);
         c["rev"] = found["rev"].clone();
-        let _ = self.client.publish(
-            "activity",
-            &json!({ "id": id, "title": c["name"], "kind": "opened" }),
-        );
+        self.activity(id, &c["name"], "opened");
         Ok(c)
     }
 
     fn write(&self, id: &str, contact: &Value, rev: Option<u64>) -> Outcome {
-        let written = sdk(self.client.put(COLLECTION, id, contact, rev))?;
+        let written = core(self.ctx().put(COLLECTION, id, contact, rev))?;
         let mut text: Vec<String> = Vec::new();
         for key in ["org", "title", "note"] {
             text.push(contact[key].as_str().unwrap_or_default().to_owned());
@@ -269,12 +325,15 @@ impl Contacts {
                 text.push(item["value"].as_str().unwrap_or_default().to_owned());
             }
         }
-        let _ = self.client.index(
+        let _ = self.ctx().index(
             id,
             contact["name"].as_str().unwrap_or_default(),
             &text.join(" "),
             false,
         );
+        let _ = self
+            .ctx()
+            .publish(&format!("contact:{id}"), &summary(id, contact));
         Ok(json!({ "id": id, "rev": written["rev"] }))
     }
 
@@ -284,38 +343,32 @@ impl Contacts {
         contact["updated"] = json!(now_ms());
         let id = new_id();
         let out = self.write(&id, &contact, Some(0))?;
-        let _ = self.client.publish(
-            "activity",
-            &json!({ "id": id, "title": contact["name"], "kind": "created" }),
-        );
+        self.activity(&id, &contact["name"], "created");
         Ok(out)
     }
 
     pub fn update(&self, id: &str, fields: &Value, rev: u64) -> Outcome {
-        let existing = sdk(self.client.get(COLLECTION, id))?
+        let existing = self
+            .find(id)?
             .ok_or_else(|| fail("not_found", "no such contact"))?;
         let mut contact = clean(fields)?;
         contact["created"] = existing["doc"]["created"].clone();
         contact["updated"] = json!(now_ms());
         let out = self.write(id, &contact, Some(rev))?;
-        let _ = self.client.publish(
-            "activity",
-            &json!({ "id": id, "title": contact["name"], "kind": "edited" }),
-        );
+        self.activity(id, &contact["name"], "edited");
         Ok(out)
     }
 
     pub fn delete(&self, id: &str, rev: u64) -> Outcome {
-        sdk(self.client.call(
-            "storage.delete",
-            json!({ "collection": COLLECTION, "id": id, "rev": rev }),
-        ))?;
-        let _ = self.client.call("search.remove", json!({ "id": id }));
+        core(self.ctx().delete(COLLECTION, id, Some(rev)))?;
+        let _ = self.ctx().unindex(id);
+        let _ = self.ctx().unpublish(&format!("contact:{id}"));
         Ok(json!({ "deleted": id }))
     }
 
-    /// For other applications: who is this address, or who matches this
-    /// name? Names, organisations, e-mail addresses and phone numbers only.
+    /// Who is this address, or who matches this name? Names, organisations,
+    /// e-mail addresses and phone numbers only. (Other applications read the
+    /// same summaries from what Contacts publishes.)
     pub fn lookup(&self, query: &str) -> Outcome {
         let q = fold(query.trim());
         if q.is_empty() {
@@ -388,51 +441,21 @@ impl Contacts {
         Ok(json!({ "imported": imported, "duplicates": duplicates, "skipped": skipped }))
     }
 
-    pub fn answer(&self, id: &Value, method: &str, params: &Value) -> Option<Value> {
-        let (answer, show) = match method {
-            "open" => {
-                let contact = params["id"].as_str().unwrap_or_default();
-                match self.get(contact) {
-                    Ok(_) => (
-                        Ok(json!({ "opened": contact })),
-                        Some(json!({ "open": contact })),
-                    ),
-                    Err(e) => (Err(e), None),
-                }
-            }
-            "focus" => (
-                Ok(json!({ "focused": true })),
-                Some(json!({ "focus": true })),
-            ),
-            "contact.lookup" => (
-                self.lookup(params["query"].as_str().unwrap_or_default()),
-                None,
-            ),
-            "contact.create" => {
-                let mut fields = Map::new();
-                for key in ["name", "given", "family", "org", "emails", "phones", "note"] {
-                    if let Some(v) = params.get(key) {
-                        fields.insert(key.into(), v.clone());
-                    }
-                }
-                match self.create(&Value::Object(fields)) {
-                    Ok(created) => {
-                        let contact = created["id"].clone();
-                        (Ok(created), Some(json!({ "open": contact })))
-                    }
-                    Err(e) => (Err(e), None),
-                }
-            }
-            _ => (Err(fail("unknown_method", "not provided")), None),
-        };
-        let reply = answer.map_err(|e| {
-            eon_office_sdk::AppError::new(
-                e["code"].as_str().unwrap_or("error"),
-                e["message"].as_str().unwrap_or_default(),
-            )
-        });
-        let _ = self.client.answer(id, reply);
-        show
+    /// What the window should do for an `eon-office://` link it was started
+    /// with or handed: open a contact by id, or come forward. Anything else is
+    /// nothing.
+    pub fn link(&self, text: &str) -> Option<Value> {
+        let link = eon_links::parse(text)?;
+        if link.app != crate::APP_ID {
+            return None;
+        }
+        if link.item.is_empty() {
+            return Some(json!({ "focus": true }));
+        }
+        self.find(&link.item)
+            .ok()
+            .flatten()
+            .map(|_| json!({ "open": link.item }))
     }
 }
 

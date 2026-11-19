@@ -4,11 +4,11 @@
 // Additional permission under GNU GPL version 3 section 7:
 // see LICENSE-EXCEPTION.md (EON Module ABI Exception 1.0).
 
-//! EON Contacts against a real core: the roadmap's acceptance criteria that a
-//! machine can check. Needs `EON_OFFICE_CORE_BIN`.
+//! EON Contacts on the EON Office library, in a home folder of its own: the
+//! roadmap's acceptance criteria that a machine can check. Nothing else has
+//! to be installed or running.
 
 #![allow(
-    clippy::too_many_lines,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -18,64 +18,30 @@
 )]
 
 use eon_contacts::contacts::Contacts;
-use eon_office_sdk::{Client, Incoming};
-use serde_json::{json, Value};
+use eon_office_core::manifest::Manifest;
+use eon_office_core::Home;
+use serde_json::json;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
-struct Core {
-    child: Child,
-    home: PathBuf,
-}
+struct TempHome(PathBuf);
 
-impl Drop for Core {
+impl Drop for TempHome {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.home);
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
-fn start(name: &str) -> (Core, Client, Contacts) {
-    let binary = std::env::var_os("EON_OFFICE_CORE_BIN").expect("set EON_OFFICE_CORE_BIN");
-    let home = std::env::temp_dir().join(format!("eon-contacts-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
-    let child = Command::new(binary)
-        .args(["serve", "--home"])
-        .arg(&home)
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while eon_office_sdk::endpoint(&home).is_err() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let owner = Client::connect_owner(&home).unwrap();
-    let manifest: Value = serde_json::from_str(eon_contacts::MANIFEST).unwrap();
-    owner
-        .call(
-            "apps.install",
-            json!({ "manifest": manifest, "grant": manifest["capabilities"] }),
-        )
-        .unwrap();
-    let token = std::fs::read_to_string(home.join("apps").join(eon_contacts::APP_ID).join("token"))
-        .unwrap();
-    let client = Client::connect(
-        &eon_office_sdk::endpoint(&home).unwrap(),
-        Some(eon_contacts::APP_ID),
-        token.trim(),
-    )
-    .unwrap();
-    (Core { child, home }, owner, Contacts::new(client))
+fn start(name: &str) -> (TempHome, Home, Contacts) {
+    let dir = std::env::temp_dir().join(format!("eon-contacts-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = Home::open(&dir).unwrap();
+    let contacts = Contacts::open(&home, None).unwrap();
+    (TempHome(dir), home, contacts)
 }
 
 #[test]
-#[ignore = "needs EON_OFFICE_CORE_BIN"]
 fn contacts_sort_find_and_refuse_stale_saves() {
-    let (_core, _owner, contacts) = start("basic");
+    let (_dir, _home, contacts) = start("basic");
     for (name, email, org) in [
         ("Zeynep Kaya", "zeynep@example.org", "Acme"),
         ("Çağla Demir", "cagla@example.org", ""),
@@ -138,9 +104,8 @@ fn contacts_sort_find_and_refuse_stale_saves() {
 }
 
 #[test]
-#[ignore = "needs EON_OFFICE_CORE_BIN"]
 fn vcards_from_outlook_and_google_import_without_duplicates() {
-    let (_core, _owner, contacts) = start("vcf");
+    let (_dir, _home, contacts) = start("vcf");
     contacts
         .create(&json!({ "name": "Grace Hopper", "emails": [{ "value": "grace@navy.example" }] }))
         .unwrap();
@@ -164,7 +129,7 @@ fn vcards_from_outlook_and_google_import_without_duplicates() {
     // Export, and the file reads back into an empty book with the same people.
     let out = contacts.export_vcf(None).unwrap();
     assert_eq!(out["count"], 3);
-    let (_core2, _owner2, fresh) = start("vcf2");
+    let (_dir2, _home2, fresh) = start("vcf2");
     assert_eq!(
         fresh.import_vcf(out["vcf"].as_str().unwrap()).unwrap()["imported"],
         3
@@ -172,33 +137,63 @@ fn vcards_from_outlook_and_google_import_without_duplicates() {
 }
 
 #[test]
-#[ignore = "needs EON_OFFICE_CORE_BIN"]
-fn another_application_looks_up_a_sender_through_the_core() {
-    let (_core, owner, contacts) = start("lookup");
-    contacts.create(&json!({ "name": "Ayşe Yılmaz", "emails": [{ "value": "ayse@example.org" }], "phones": [{ "value": "+90 555" }], "note": "private" })).unwrap();
-    let answering = std::thread::spawn(move || {
-        while let Some(message) = contacts.client.next(Some(Duration::from_secs(10))) {
-            if let Incoming::Invoke {
-                id, method, params, ..
-            } = message
-            {
-                return contacts.answer(&id, &method, &params);
-            }
-        }
-        panic!("no invoke");
-    });
-    let found = owner
-        .call_app(
-            eon_contacts::APP_ID,
-            "contact.lookup",
-            json!({ "query": "AYSE@example.org" }),
+fn another_app_reads_published_summaries_not_notes() {
+    let (_dir, home, contacts) = start("public");
+    let made = contacts.create(&json!({ "name": "Ayşe Yılmaz", "org": "Acme", "emails": [{ "value": "ayse@example.org" }], "phones": [{ "value": "+90 555" }], "note": "private" })).unwrap();
+    let id = made["id"].as_str().unwrap();
+    // Mail or Calendar, declaring call:org.eon.office.contacts, reads the summaries.
+    let mail = home
+        .app(
+            &Manifest::from_json(json!({
+                "manifest": 0, "id": "org.test.mail", "name": "Mail", "version": "0.1.0",
+                "api": { "min": 0, "max": 0 }, "capabilities": ["call:org.eon.office.contacts"],
+            }))
+            .unwrap(),
+            None,
         )
         .unwrap();
-    assert!(
-        answering.join().unwrap().is_none(),
-        "a lookup shows nothing in the window"
+    let seen = mail.public_of(eon_contacts::APP_ID).unwrap();
+    assert_eq!(seen.len(), 1);
+    let (key, summary) = &seen[0];
+    assert_eq!(key, &format!("contact:{id}"));
+    assert_eq!(
+        summary,
+        &json!({ "id": id, "name": "Ayşe Yılmaz", "org": "Acme", "emails": ["ayse@example.org"], "phones": ["+90 555"] })
     );
-    assert_eq!(found["matches"][0]["name"], "Ayşe Yılmaz");
-    assert_eq!(found["matches"][0]["phones"], json!(["+90 555"]));
-    assert!(found["matches"][0].get("note").is_none());
+    // An edit is published again; a delete takes the summary away.
+    let rev = contacts.get(id).unwrap()["rev"].as_u64().unwrap();
+    contacts
+        .update(
+            id,
+            &json!({ "name": "Ayşe Y.", "emails": [{ "value": "ayse@example.org" }] }),
+            rev,
+        )
+        .unwrap();
+    assert_eq!(
+        mail.public_of(eon_contacts::APP_ID).unwrap()[0].1["name"],
+        "Ayşe Y."
+    );
+    let rev = contacts.get(id).unwrap()["rev"].as_u64().unwrap();
+    contacts.delete(id, rev).unwrap();
+    assert!(mail.public_of(eon_contacts::APP_ID).unwrap().is_empty());
+}
+
+#[test]
+fn a_link_argument_opens_the_contact() {
+    let (_dir, _home, contacts) = start("link");
+    let made = contacts.create(&json!({ "name": "Linked" })).unwrap();
+    let id = made["id"].as_str().unwrap();
+    assert_eq!(
+        contacts.link(&format!("eon-office://org.eon.office.contacts/{id}")),
+        Some(json!({ "open": id }))
+    );
+    assert_eq!(
+        contacts.link("eon-office://org.eon.office.contacts"),
+        Some(json!({ "focus": true }))
+    );
+    assert_eq!(contacts.link("eon-office://org.eon.office.notes/x"), None);
+    assert_eq!(
+        contacts.link("eon-office://org.eon.office.contacts/nope"),
+        None
+    );
 }

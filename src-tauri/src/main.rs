@@ -8,15 +8,20 @@
 //!
 //! ```text
 //! eon-contacts                    open the window
+//! eon-contacts eon-office://...   open the window on an item (a running window takes it)
 //! eon-contacts --selftest [FILE]  strings and interface checks
 //! eon-contacts --version
 //! ```
+//!
+//! EON Contacts stands alone: it opens its own store in the EON Office home
+//! folder through the `eon-office-core` library. Nothing else has to be
+//! installed or running.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eon_contacts::checks;
 use eon_contacts::contacts::{Contacts, Outcome};
-use eon_office_sdk::{Client, Incoming};
+use eon_office_core::Home;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -29,6 +34,8 @@ const SCRIPT: &str = include_str!("../../src/app.js");
 #[derive(Default)]
 struct Shared {
     contacts: Mutex<Option<Arc<Contacts>>>,
+    /// The link EON Contacts was started with, until the window has shown it.
+    pending: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -37,63 +44,68 @@ impl Shared {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .ok_or_else(|| json!({ "code": "not_connected", "message": "not connected" }))
+            .ok_or_else(|| json!({ "code": "not_open", "message": "not open yet" }))
     }
 }
 
 type State<'a> = tauri::State<'a, Shared>;
 
-/// Connect to the core as EON Contacts and start answering other applications.
-fn connect(app: &tauri::AppHandle, shared: &Shared) -> Outcome {
-    if let Ok(contacts) = shared.contacts() {
-        return Ok(json!({ "granted": contacts.client.granted() }));
+/// Open the store in the EON Office home folder and register EON Contacts there.
+fn open(app: &tauri::AppHandle, shared: &Shared) -> Outcome {
+    if shared.contacts().is_ok() {
+        return Ok(json!({ "open": true }));
     }
-    let client = Client::connect_app(eon_contacts::APP_ID).map_err(|e| {
-        let code = if e.code() == "unauthenticated" {
-            "not_installed"
-        } else if e.code() == "connection" {
-            "no_core"
-        } else {
-            e.code()
-        };
-        json!({ "code": code, "message": e.to_string() })
-    })?;
-    let granted = client.granted();
-    let contacts = Arc::new(Contacts::new(client));
+    let root = Home::default_location()
+        .ok_or_else(|| json!({ "code": "no_home", "message": "no per-user data folder" }))?;
+    let home = eon_contacts::contacts::core(Home::open(&root))?;
+    let folder = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let contacts = Arc::new(Contacts::open(&home, folder.as_deref())?);
     *shared
         .contacts
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&contacts));
+
+    // Preferences are shared with every EON Office application; notice a
+    // change made elsewhere (the launcher) within two seconds.
     let handle = app.clone();
     std::thread::spawn(move || {
-        while let Some(message) = contacts.client.next(None) {
-            match message {
-                Incoming::Invoke {
-                    id, method, params, ..
-                } => {
-                    if let Some(show) = contacts.answer(&id, &method, &params) {
-                        if let Some(window) = handle.get_webview_window("main") {
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
-                        let _ = handle.emit("show", show);
-                    }
-                }
-                Incoming::Event { topic, .. } if topic == "core/prefs.changed" => {
-                    let _ = handle.emit("prefs-changed", ());
-                }
-                Incoming::Shutdown => {
-                    // The core asks Contacts to leave: the interface saves first.
-                    let _ = handle.emit("save-and-quit", ());
-                    std::thread::sleep(Duration::from_millis(1500));
-                    handle.exit(0);
-                    break;
-                }
-                _ => {}
+        let mut seen = contacts.prefs_version();
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let now = contacts.prefs_version();
+            if now != seen {
+                seen = now;
+                let _ = handle.emit("prefs-changed", ());
             }
         }
     });
-    Ok(json!({ "granted": granted }))
+    Ok(json!({ "open": true }))
+}
+
+/// Show what a link asks for, bringing the window forward.
+fn deliver(app: &tauri::AppHandle, link: &str) {
+    let state = app.state::<Shared>();
+    let Ok(contacts) = state.contacts() else {
+        // Not open yet: the window asks for it once it is.
+        *state.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(link.to_owned());
+        return;
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    if let Some(show) = contacts.link(link) {
+        let _ = app.emit("show", show);
+    }
+}
+
+fn link_argument(args: &[String]) -> Option<String> {
+    args.iter()
+        .skip(1)
+        .find(|a| a.starts_with(eon_office_core::links::SCHEME))
+        .cloned()
 }
 
 #[tauri::command(async)]
@@ -103,16 +115,24 @@ fn strings(language: String) -> Value {
 
 #[tauri::command(async)]
 fn status(app: tauri::AppHandle, state: State<'_>) -> Outcome {
-    connect(&app, &state)
+    open(&app, &state)
+}
+
+/// The link EON Contacts was started with, once: what the window shows first.
+#[tauri::command(async)]
+fn initial(state: State<'_>) -> Outcome {
+    let contacts = state.contacts()?;
+    let link = state
+        .pending
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    Ok(link.and_then(|l| contacts.link(&l)).unwrap_or(Value::Null))
 }
 
 #[tauri::command(async)]
 fn prefs(state: State<'_>) -> Outcome {
-    state
-        .contacts()?
-        .client
-        .prefs()
-        .map_err(|e| json!({ "code": e.code(), "message": e.to_string() }))
+    state.contacts()?.prefs()
 }
 
 #[tauri::command(async)]
@@ -178,15 +198,33 @@ fn main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     builder.build().map(|_| ())
 }
 
-fn window() {
+fn window(link: Option<String>) {
+    let shared = Shared::default();
+    *shared
+        .pending
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = link;
     let app = tauri::Builder::default()
-        .manage(Shared::default())
+        // First, so a second start hands over its link and exits before
+        // anything else happens.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, args, _cwd| match link_argument(&args) {
+                Some(link) => deliver(app, &link),
+                None => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                }
+            },
+        ))
+        .manage(shared)
         .setup(|app| {
             main_window(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            strings, status, prefs, list, get, create, update, delete, search, export_vcf,
+            strings, status, initial, prefs, list, get, create, update, delete, search, export_vcf,
             import_vcf,
         ])
         .build(tauri::generate_context!());
@@ -231,6 +269,25 @@ fn main() {
     let mut arguments = std::env::args().skip(1);
     match arguments.next().as_deref() {
         Some("--version" | "-V") => println!("EON Contacts {}", env!("CARGO_PKG_VERSION")),
+        // Debug builds only: change a shared preference, as the launcher would,
+        // so tools/ui-check.mjs can check that a running window follows it.
+        #[cfg(debug_assertions)]
+        Some("--set-pref") => {
+            let (key, value) = (
+                arguments.next().unwrap_or_default(),
+                arguments.next().unwrap_or_default(),
+            );
+            let value: Value = serde_json::from_str(&value).unwrap_or(Value::String(value));
+            let done = Home::default_location()
+                .ok_or_else(|| "no home folder".to_owned())
+                .and_then(|root| Home::open(&root).map_err(|e| e.to_string()))
+                .and_then(|home| home.shared().map_err(|e| e.to_string()))
+                .and_then(|shared| shared.set_pref(&key, &value).map_err(|e| e.to_string()));
+            if let Err(e) = done {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         Some("--selftest") => {
             let report = selftest();
             match arguments.next() {
@@ -246,6 +303,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        _ => window(),
+        _ => window(link_argument(&std::env::args().collect::<Vec<_>>())),
     }
 }

@@ -2,12 +2,12 @@
   "manifest": 0,
   "id": "org.eon.office.contacts",
   "name": "EON Contacts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api": {
     "min": 0,
     "max": 0
   },
-  "description": "People and organisations with groups, vCard import and export, and lookup for other applications.",
+  "description": "People and organisations with groups and vCard import and export. Publishes names, organisations, e-mail addresses and phone numbers for applications you allow; other applications open a contact with an eon-office:// link.",
   "entry": {
     "command": "eon-contacts"
   },
@@ -20,19 +20,7 @@
   "provides": [
     {
       "method": "open",
-      "description": "Show a contact by id."
-    },
-    {
-      "method": "focus",
-      "description": "Bring the Contacts window to the front."
-    },
-    {
-      "method": "contact.lookup",
-      "description": "Find contacts by e-mail address or part of a name; returns names, organisations, e-mail addresses and phone numbers."
-    },
-    {
-      "method": "contact.create",
-      "description": "Create a contact from `name`, `emails`, `phones`, `org`; returns its `id`."
+      "description": "eon-office://org.eon.office.contacts/<id> shows that item; with no id, the window comes forward."
     }
   ],
   "publishes": [

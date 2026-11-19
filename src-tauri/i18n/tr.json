@@ -43,8 +43,7 @@
   "import.go": "İçe aktar",
   "import.done": "{count} kişi içe aktarıldı; {duplicates} tanesi zaten kayıtlıydı.",
   "conflict": "Bu kişi, siz açtıktan sonra başka bir yerde değişti. Görmek için yeniden yükleyin.",
-  "not.installed": "EON Contacts henüz EON Office'e kurulu değil. EON Launcher'ı açın, bu programın yanındaki manifest.json dosyasından kurun ve izinlerini verin.",
-  "no.core": "EON Office çalışmıyor. Önce EON Launcher'ı başlatın.",
   "retry": "Yeniden dene",
-  "error": "Bir şeyler ters gitti: {reason}"
+  "error": "Bir şeyler ters gitti: {reason}",
+  "open.failed": "EON Contacts kişilerinizi açamadı: {reason}"
 }

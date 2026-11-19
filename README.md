@@ -7,13 +7,14 @@ SPDX-FileCopyrightText: 2026 EON contributors
 
 **The people you work and live with, in one place your other applications can ask.**
 Names, organisations, e-mail addresses, phone numbers, birthdays, notes and groups; vCard
-import from Outlook, Google, Apple and Thunderbird, and export back; and a lookup other EON
-Office applications use — EON Mail to name a sender, EON Calendar to find an attendee — that
-hands them a summary, never the whole card. Part of [EON Office](https://github.com/EON-Extensible-Open-Network/eon-docs/blob/main/office/roadmap.md)'s Wave 1.
+import from Outlook, Google, Apple and Thunderbird, and export back; and a summary other EON
+Office applications may read — EON Mail to name a sender, EON Calendar to find an attendee —
+never the whole card. Part of [EON Office](https://github.com/EON-Extensible-Open-Network/eon-docs/blob/main/office/roadmap.md)'s Wave 1.
 
-> **0.1.0** — protocol `v0`, early. **CardDAV sync is not in this version**; it needs the
-> credential storage in the operating system's keychain designed for EON Mail, and moves to
-> `0.2` with it (roadmap §6 records the change).
+> **0.2.0** — formats `v0`, early. **Stands alone:** download it, run it. Nothing else
+> has to be installed or running. **CardDAV sync is not in this version**; it needs the
+> credential storage in the operating system's keychain designed for EON Mail, and comes
+> with it (roadmap §6 records the change).
 
 ## What it does
 
@@ -25,22 +26,33 @@ hands them a summary, never the whole card. Part of [EON Office](https://github.
   and 4.0 (RFC 6350); a card whose e-mail address you already have is not duplicated.
   **Export** writes 3.0, which every one of those reads.
 - **Two windows never overwrite each other:** a save on an out-of-date version is refused.
-- **For other applications** (if you allow them `call:org.eon.office.contacts`):
-  `contact.lookup` by address or part of a name returns names, organisations, addresses and
-  numbers only; `contact.create`, `open`, `focus`.
 - **Keyboard:** arrows, Home and End in the list, Enter to the card, Ctrl+N for a new
-  contact. Follows EON Launcher's language, theme, text size, contrast and motion
-  preferences, live.
+  contact. Follows the language, theme, text size, contrast and motion preferences shared by
+  EON Office applications, live.
+- **One window.** Starting Contacts again, or following a link to a contact, brings the
+  open window forward.
 
-**What it asks for:** `storage`, `search.index`, `search.query`, `events.publish`.
+**With other EON Office applications** (all optional): Contacts publishes a summary of each
+person — name, organisation, e-mail addresses, phone numbers — that applications you allow
+(`call:org.eon.office.contacts`) may read; notes, birthdays, addresses and groups stay in
+Contacts. `eon-office://org.eon.office.contacts/<id>` opens a contact.
+
+**What it asks for:** keep its data on this device (`storage`), make contacts searchable
+(`search.index`, private to Contacts), search (`search.query`), add names to your recent list
+and publish the summaries (`events.publish`).
+
+## Install
+
+Download `eon-contacts` from a release and run it — see the release notes for checksums.
+Or, with EON Launcher: *Get applications* → *Include previews* → EON Contacts.
 
 ## Develop
 
 ```
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
-EON_OFFICE_CORE_BIN=/path/to/eon-office-core cargo test -- --include-ignored
-node tools/ui-check.mjs --contacts target/debug/eon-contacts.exe --core /path/to/eon-office-core.exe --shots shots
+cargo test
+node tools/ui-check.mjs --contacts target/debug/eon-contacts.exe --shots shots
 ```
 
 Licence `GPL-3.0-or-later` with the [EON Module ABI Exception](LICENSE-EXCEPTION.md).

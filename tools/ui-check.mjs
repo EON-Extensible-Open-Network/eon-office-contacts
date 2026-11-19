@@ -2,23 +2,21 @@
 // SPDX-FileCopyrightText: 2026 EON contributors
 //
 // Drives the real EON Contacts window through the WebView2 DevTools protocol.
-// The core is started in a private home, Contacts is installed and launched by
-// the core -- as a person's launcher would -- and the window is checked.
-// No dependencies (Node 22+), Windows, debug build of Contacts.
+// EON Contacts is started on its own in a private EON Office home -- nothing else
+// is installed or running, which is the point -- and the window is checked.
+// No dependencies (Node 22+), Windows, debug build.
 //
-//   node tools/ui-check.mjs --contacts <eon-contacts.exe> --core <eon-office-core.exe> [--shots <dir>]
+//   node tools/ui-check.mjs --contacts <exe> [--shots <dir>]
 
-import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
-import { createConnection } from "node:net";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const arg = (name) => { const at = process.argv.indexOf(name); return at > 0 ? process.argv[at + 1] : undefined; };
 const appExe = arg("--contacts") && resolve(arg("--contacts"));
-const coreExe = arg("--core") && resolve(arg("--core"));
 const shots = arg("--shots");
-if (!appExe || !coreExe) { console.error("usage: node tools/ui-check.mjs --contacts <exe> --core <exe> [--shots <dir>]"); process.exit(2); }
+if (!appExe) { console.error("usage: node tools/ui-check.mjs --contacts <exe> [--shots <dir>]"); process.exit(2); }
 if (shots) mkdirSync(shots, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -30,27 +28,17 @@ const check = (name, ok, detail = "") => {
   if (!ok) failures++;
 };
 
-function owner() {
-  const endpoint = JSON.parse(readFileSync(join(home, "runtime", "endpoint.json"), "utf8"));
-  const [host, p] = endpoint.address.split(":");
-  const socket = createConnection({ host, port: Number(p) });
-  let buffer = ""; let next = 1; const waiting = new Map();
-  socket.setEncoding("utf8");
-  socket.on("data", (chunk) => {
-    buffer += chunk; let at;
-    while ((at = buffer.indexOf("\n")) >= 0) {
-      const m = JSON.parse(buffer.slice(0, at)); buffer = buffer.slice(at + 1);
-      if (!m.method && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); }
-    }
-  });
-  const call = (method, params = {}) => new Promise((ok, no) => {
-    const id = next++;
-    waiting.set(id, (m) => (m.error ? no(m.error) : ok(m.result)));
-    socket.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-  });
-  const token = readFileSync(join(home, "runtime", "owner.token"), "utf8").trim();
-  const ready = new Promise((r) => socket.on("connect", r)).then(() => call("session.hello", { token }));
-  return { call, ready, close: () => socket.destroy() };
+const env = { ...process.env, EON_OFFICE_HOME: home, EON_WEBVIEW_ARGS: `--remote-debugging-port=${port}` };
+// A shared preference changed elsewhere -- as the launcher would.
+function setPref(key, value) {
+  const r = spawnSync(appExe, ["--set-pref", key, JSON.stringify(value)], { env, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`--set-pref ${key}: ${r.stderr}`);
+}
+// Another application opens an item with a link: a second start hands it to
+// the running window and exits. Resolves to whether it exited.
+function secondStart(link) {
+  const second = spawn(appExe, [link], { env, stdio: "ignore" });
+  return new Promise((done) => { const timer = setTimeout(() => done(false), 15000); second.on("exit", () => { clearTimeout(timer); done(true); }); });
 }
 
 let cdp;
@@ -100,26 +88,16 @@ async function shot(name) {
   writeFileSync(join(shots, `contacts-${name}.png`), Buffer.from(r.result.data, "base64"));
 }
 
-const core = spawn(coreExe, ["serve", "--home", home], {
-  env: { ...process.env, EON_WEBVIEW_ARGS: `--remote-debugging-port=${port}` },
-  stdio: "ignore",
-});
-let o;
+let app;
 try {
   console.log("EON Contacts interface check");
-  for (let i = 0; i < 100 && !existsSync(join(home, "runtime", "endpoint.json")); i++) await sleep(100);
-  o = owner();
-  await o.ready;
-  await o.call("prefs.set", { key: "locale", value: "en" });
-  const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
-  manifest.entry = { command: appExe };
-  await o.call("apps.install", { manifest, grant: manifest.capabilities });
-  await o.call("apps.launch", { app: manifest.id });
+  setPref("locale", "en");
+  app = spawn(appExe, [], { env, stdio: "ignore" });
   cdp = await devtools();
   await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true });
   const setv = (id, v) => `document.getElementById('${id}').value = ${JSON.stringify(v)};`;
 
-  check("the window connects with an empty book", await until(`document.body.dataset.ready === '1' && !document.getElementById('empty').hidden`, 20000));
+  check("the window opens on its own with an empty book", await until(`document.body.dataset.ready === '1' && !document.getElementById('empty').hidden`, 20000));
   await js(`document.getElementById('new-contact').click()`);
   check("New contact opens a blank card, name focused", await until(`!document.getElementById('card').hidden && document.activeElement.id === 'c-name'`));
   check("the card starts with one e-mail and one phone row", await js(`document.querySelectorAll('#emails li').length === 1 && document.querySelectorAll('#phones li').length === 1`));
@@ -151,15 +129,17 @@ try {
   await key("ArrowDown");
   check("ArrowDown opens the next", await until(`document.getElementById('c-name').value === 'Cem Ak'`));
 
-  const found = await o.call("apps.call", { app: manifest.id, method: "contact.lookup", params: { query: "cem@example.org" } });
-  check("another app's lookup finds the contact through the core", found.matches?.[0]?.name === "Cem Ak");
-
   await js(`document.getElementById('delete').click()`);
   check("Delete asks first", await until(`!document.getElementById('delete-confirm').hidden && document.activeElement.id === 'delete-no'`));
   await js(`document.getElementById('delete-yes').click()`);
   check("confirming deletes", await until(`!document.getElementById('contact-list').textContent.includes('Cem Ak')`));
 
-  await o.call("prefs.set", { key: "locale", value: "tr" });
+  const ayse = await js(`(async () => (await window.__TAURI__.core.invoke('list', { group: null })).contacts.find(c => c.name === 'Ayşe Yılmaz').id)()`);
+  const exited = await secondStart(`eon-office://org.eon.office.contacts/${ayse}`);
+  check("a link opens the contact in the running window", await until(`document.getElementById('c-name').value === 'Ayşe Yılmaz'`, 15000));
+  check("the second start exits instead of opening a second window", exited);
+
+  setPref("locale", "tr");
   check("a language change reaches Contacts, including built text", await until(`document.getElementById('new-contact').textContent === 'Yeni kişi' && document.getElementById('count').textContent.endsWith('kişi') && document.getElementById('group-filter').options[0].textContent === 'Herkes'`));
   await shot("02-turkish");
 
@@ -173,11 +153,9 @@ try {
   failures++;
   console.error(`  FAIL  ${error.stack || error}`);
 } finally {
-  try { await o?.call("core.shutdown"); } catch { /* gone */ }
-  o?.close();
   cdp?.close();
+  try { app?.kill(); } catch { /* gone */ }
   await sleep(1500);
-  try { core.kill(); } catch { /* gone */ }
   try { rmSync(home, { recursive: true, force: true }); } catch { /* in use */ }
 }
 console.log(failures ? `\n${failures} check(s) failed.` : "\nall checks passed");

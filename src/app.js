@@ -240,12 +240,14 @@ $("import-form").addEventListener("submit", async (event) => {
   }
 });
 
-// ---- the core ---------------------------------------------------------------------
+// ---- links and preference changes ---------------------------------------------------------------------
 
-listen("show", async ({ payload }) => {
+async function show(payload) {
+  if (!payload) return;
   await refresh();
-  if (payload.open) openContact(payload.open);
-});
+  if (payload.open) await openContact(payload.open);
+}
+listen("show", ({ payload }) => show(payload));
 listen("prefs-changed", async () => {
   await applyPrefs();
   await refresh();
@@ -264,11 +266,12 @@ async function start() {
     $("layout").hidden = false;
     await refresh();
     if (document.activeElement === document.body || document.activeElement === null) $("contact-list").focus();
+    await show(await invoke("initial"));
     document.body.dataset.ready = "1";
   } catch (e) {
     $("layout").hidden = true;
     $("banner").hidden = false;
-    $("banner-text").textContent = e && e.code === "not_installed" ? t("not.installed") : e && e.code === "no_core" ? t("no.core") : t("error", { reason: reason(e) });
+    $("banner-text").textContent = t("open.failed", { reason: reason(e) });
   }
 }
 $("retry").addEventListener("click", start);

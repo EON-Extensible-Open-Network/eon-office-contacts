@@ -43,8 +43,7 @@
   "import.go": "Import",
   "import.done": "Imported {count}; {duplicates} already known.",
   "conflict": "This contact changed elsewhere since you opened it. Reload to see it.",
-  "not.installed": "EON Contacts is not installed in EON Office yet. Open EON Launcher and install it from the manifest.json beside this program, then allow its permissions.",
-  "no.core": "EON Office is not running. Start EON Launcher first.",
   "retry": "Try again",
-  "error": "Something went wrong: {reason}"
+  "error": "Something went wrong: {reason}",
+  "open.failed": "EON Contacts could not open your contacts: {reason}"
 }
