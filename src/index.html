@@ -1,0 +1,95 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileCopyrightText: 2026 EON contributors
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EON Contacts</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="banner" class="banner" role="alert" hidden>
+    <p id="banner-text"></p>
+    <button id="retry" data-i18n="retry">Try again</button>
+  </div>
+
+  <div class="layout" id="layout" hidden>
+    <nav class="sidebar" data-i18n-label="contacts.label" aria-label="Contacts">
+      <button id="new-contact" data-i18n="new">New contact</button>
+      <label for="search" class="sr-only" data-i18n="search.label">Search contacts</label>
+      <input id="search" type="search" autocomplete="off" data-i18n-placeholder="search.placeholder">
+      <label for="group-filter" class="sr-only" data-i18n="groups.label">Groups</label>
+      <select id="group-filter"></select>
+      <p id="count" class="status" aria-live="polite"></p>
+      <ul id="contact-list" role="listbox" tabindex="0" data-i18n-label="contacts.label" aria-label="Contacts"></ul>
+      <details>
+        <summary data-i18n="export">Export vCard</summary>
+        <form id="export-form">
+          <label for="export-path" data-i18n="export.label">Save to</label>
+          <input id="export-path" type="text" spellcheck="false" data-i18n-placeholder="export.placeholder">
+          <button type="submit" data-i18n="export">Export vCard</button>
+        </form>
+        <form id="import-form">
+          <label for="import-path" data-i18n="import.label">Import</label>
+          <input id="import-path" type="text" spellcheck="false" data-i18n-placeholder="import.placeholder">
+          <button type="submit" data-i18n="import.go">Import</button>
+        </form>
+      </details>
+    </nav>
+
+    <main id="main" tabindex="-1">
+      <p id="empty" class="muted" hidden data-i18n="empty"></p>
+      <form id="card" hidden novalidate>
+        <div class="grid">
+          <label for="c-name" data-i18n="name">Full name</label>
+          <input id="c-name" type="text" autocomplete="off">
+          <label for="c-given" data-i18n="given">Given name</label>
+          <input id="c-given" type="text" autocomplete="off">
+          <label for="c-family" data-i18n="family">Family name</label>
+          <input id="c-family" type="text" autocomplete="off">
+          <label for="c-org" data-i18n="org">Organisation</label>
+          <input id="c-org" type="text" autocomplete="off">
+          <label for="c-title" data-i18n="title">Job title</label>
+          <input id="c-title" type="text" autocomplete="off">
+        </div>
+        <fieldset>
+          <legend data-i18n="emails">E-mail addresses</legend>
+          <ul id="emails" class="rows"></ul>
+          <button type="button" id="add-email" class="secondary" data-i18n="add.email">Add an e-mail address</button>
+        </fieldset>
+        <fieldset>
+          <legend data-i18n="phones">Phone numbers</legend>
+          <ul id="phones" class="rows"></ul>
+          <button type="button" id="add-phone" class="secondary" data-i18n="add.phone">Add a phone number</button>
+        </fieldset>
+        <div class="grid">
+          <label for="c-birthday" data-i18n="birthday">Birthday</label>
+          <input id="c-birthday" type="date">
+          <label for="c-url" data-i18n="url">Web site</label>
+          <input id="c-url" type="text" autocomplete="off">
+          <label for="c-groups" data-i18n="groups">Groups</label>
+          <input id="c-groups" type="text" autocomplete="off">
+          <label for="c-note" data-i18n="note">Notes</label>
+          <textarea id="c-note" rows="4"></textarea>
+        </div>
+        <div class="actions">
+          <button type="submit" data-i18n="save">Save</button>
+          <button type="button" id="delete" class="danger" data-i18n="delete">Delete</button>
+          <span id="save-status" class="status" role="status" aria-live="polite"></span>
+        </div>
+        <div id="delete-confirm" hidden>
+          <p id="delete-question"></p>
+          <button type="button" id="delete-yes" class="danger" data-i18n="delete">Delete</button>
+          <button type="button" id="delete-no" class="secondary" data-i18n="cancel">Cancel</button>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <div id="announcer" class="sr-only" aria-live="assertive"></div>
+  <script src="app.js"></script>
+</body>
+</html>
