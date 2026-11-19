@@ -221,7 +221,7 @@ $("delete-yes").addEventListener("click", async () => {
 $("export-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    const r = await invoke("exportVcf", { path: $("export-path").value, group: $("group-filter").value || null });
+    const r = await invoke("export_vcf", { path: $("export-path").value, group: $("group-filter").value || null });
     $("count").textContent = t("exported", { count: r.count, path: r.path });
     announce(t("exported", { count: r.count, path: r.path }));
   } catch (e) {
@@ -231,7 +231,7 @@ $("export-form").addEventListener("submit", async (event) => {
 $("import-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    const r = await invoke("importVcf", { path: $("import-path").value });
+    const r = await invoke("import_vcf", { path: $("import-path").value });
     await refresh();
     $("count").textContent = t("import.done", { count: r.imported, duplicates: r.duplicates });
     announce(t("import.done", { count: r.imported, duplicates: r.duplicates }));

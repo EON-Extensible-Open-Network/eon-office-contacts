@@ -20,6 +20,11 @@ release, with these changes:
   published once at the first start.
 - **One window:** a second start, or an `eon-office://org.eon.office.contacts/<id>` link,
   goes to the running window. Replaces `open`, `focus` and `contact.create`.
+- **Export and import vCard work from the window.** The buttons invoked
+  `exportVcf`/`importVcf`, names the host never registered (Tauri matches the Rust
+  function name, `export_vcf`), so both failed when pressed. The self-test now fails the
+  build when the interface invokes a command the host does not register, and the window
+  check exports and re-imports through the forms.
 
 ## 0.1.0 — first version
 

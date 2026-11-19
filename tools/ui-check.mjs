@@ -139,6 +139,13 @@ try {
   check("a link opens the contact in the running window", await until(`document.getElementById('c-name').value === 'Ayşe Yılmaz'`, 15000));
   check("the second start exits instead of opening a second window", exited);
 
+  // vCard out and back in, through the forms a person uses.
+  const vcf = join(home, "out.vcf");
+  await js(`(() => { document.querySelector('details').open = true; document.getElementById('export-path').value = ${JSON.stringify(vcf)}; document.getElementById('export-form').requestSubmit(); })()`);
+  check("Export vCard writes the file", await until(`document.getElementById('announcer').textContent.startsWith('Saved ')`));
+  await js(`(() => { document.getElementById('import-path').value = ${JSON.stringify(vcf)}; document.getElementById('import-form').requestSubmit(); })()`);
+  check("importing it back finds every contact already known", await until(`/^Imported 0; [1-9]/.test(document.getElementById('announcer').textContent)`));
+
   setPref("locale", "tr");
   check("a language change reaches Contacts, including built text", await until(`document.getElementById('new-contact').textContent === 'Yeni kişi' && document.getElementById('count').textContent.endsWith('kişi') && document.getElementById('group-filter').options[0].textContent === 'Herkes'`));
   await shot("02-turkish");
